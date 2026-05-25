@@ -3,13 +3,45 @@ PKG Package Script - 3ds Max
 
 Workflow:
 1. Enter SERIES NAME (e.g. B779).
-2. Type a Kit ID in each row (e.g. B16, B1, 46, 92) and choose the
-   matching scene object from the dropdown.
+2. For each kit row: type Kit ID, pick TYPE
+   (BED/HEADBOARD/NIGHTSTAND/CHEST/DRESSER/MIRROR/OTHER or AUTO)
+   and choose the matching scene object from the dropdown.
 3. Click "+ ADD MORE KIT" to add more rows.
 4. Click "REFRESH SCENE OBJECTS" anytime to rescan the scene.
 5. Browse to the Excel file containing the package rows.
-6. Click RUN. A preview dialog lists every package that will be created.
-7. Click RUN in the preview dialog to actually run the script.
+6. Set FRONT AXIS to the world axis the models' fronts currently face
+   in your scene (most furniture libraries use +Y). The script rotates
+   each piece so its front faces the camera (-Y world) before applying
+   the artistic angle.
+7. Set GAP (scene units) between pieces, and the default ANGLES for
+   BED / NIGHTSTAND / CHEST / DRESSER.
+8. Optional: click "PICK VRAY CAMERA" and pick a template
+   VRayPhysicalCamera in the viewport. A copy of the camera+target is
+   cloned into every package layer. The cloned camera's X is forced to
+   0 to keep the bed centred on screen.
+9. Click RUN. A preview dialog lists every package that will be created.
+10. Click RUN in the preview dialog to actually run the script.
+
+Bedroom mode (when at least one BED kit is mapped):
+   - BED at the center, rotated by ANGLE BED
+   - NIGHTSTANDs to the left of the bed. First nightstand gets ANGLE NS,
+     each subsequent one alternates with ANGLE NS - 2.5 (the rule from
+     the spec: paired nightstands differ by 2.5 degrees so both show
+     the same amount of side in screen space).
+   - CHESTs then DRESSERs to the right
+   - MIRRORs stacked on top of the matching dresser (or appended to
+     the right row if no dresser exists)
+   - OTHERs placed behind the bed
+
+Headboard mode (no BED, but HEADBOARD is mapped, or auto-detected):
+   - All pieces laid out in a single back row, centred on origin
+   - Order left to right: NIGHTSTANDs, HEADBOARD, CHESTs, DRESSERs
+   - MIRRORs stacked on top of the matching dresser
+
+TYPE = AUTO auto-classifies by bounding-box shape: the single
+largest item becomes the bed; remaining are classified by their
+aspect ratio (mirror = tall+thin, dresser = wide, chest = tall,
+else nightstand).
 
 Excel package format:
    PKG026197 (B779B16,1;B779B1,1;B779-46,1;B779-92,1)
@@ -54,12 +86,13 @@ rollout pkgPreviewDlg "Confirm Packages" width:460 height:530
     )
 )
 
-rollout pkgRollout "Package Script" width:560 height:615
+rollout pkgRollout "Package Script" width:560 height:680
 (
     local noneTag         = "(none)"
     local pendingSeries   = ""
     local pendingPairs    = #()
     local pendingPackages = #()
+    local pickedCamera    = undefined
 
     label lblTitle "PACKAGE SCRIPT" pos:[200,12] width:200 height:18
 
@@ -77,7 +110,26 @@ rollout pkgRollout "Package Script" width:560 height:615
     edittext edtExcel  ""           pos:[125,527] width:320 height:22 readonly:true
     button   btnBrowse "..."        pos:[450,527] width:90  height:22
 
-    button btnRun "RUN" pos:[455,568] width:85 height:32
+    label        lblFront   "FRONT AXIS" pos:[20,562]  width:90
+    dropdownList ddlFront   items:#("+Y","-Y","+X","-X") pos:[115,558] width:55 selection:2
+    label        lblBedHead "BED HEAD"   pos:[180,562] width:60
+    dropdownList ddlBedHead items:#("Auto","+Y","-Y","+X","-X") pos:[245,558] width:55 selection:1
+    label        lblGap     "GAP"        pos:[315,562] width:30
+    spinner      spnGap     ""           pos:[350,560] width:90  range:[0,100000,5.0] type:#float
+
+    label   lblAngles      "ANGLES (deg)" pos:[20,592]  width:90
+    label   lblAngBed      "BED"          pos:[115,592] width:30
+    spinner spnAngleBed    ""             pos:[148,590] width:55  range:[-180,180,35]   type:#float scale:0.5
+    label   lblAngNS       "NS"           pos:[210,592] width:25
+    spinner spnAngleNS     ""             pos:[238,590] width:55  range:[-180,180,35]   type:#float scale:0.5
+    label   lblAngChest    "CHEST"        pos:[300,592] width:40
+    spinner spnAngleChest  ""             pos:[342,590] width:55  range:[-180,180,32.5] type:#float scale:0.5
+    label   lblAngDresser  "DRESS"        pos:[405,592] width:45
+    spinner spnAngleDresser ""            pos:[452,590] width:55  range:[-180,180,35]   type:#float scale:0.5
+
+    button btnPickCam   "PICK VRAY CAMERA"    pos:[20,630]  width:160 height:32
+    label  lblPickedCam "(no camera picked)"  pos:[190,637] width:255 height:18
+    button btnRun       "RUN"                 pos:[455,630] width:85  height:32
 
     fn trimAll s = trimLeft (trimRight s)
 
@@ -98,22 +150,22 @@ rollout pkgRollout "Package Script" width:560 height:615
         local rowCount = dgvKits.RowCount
         for i = 0 to (rowCount - 1) do
         (
-            local cell = dgvKits.Rows.Item[i].Cells.Item[1]
+            local cell = dgvKits.Rows.Item[i].Cells.Item[2]
             local v = cell.Value
             local s = ""
             try (if v != undefined then s = v as string) catch()
             append savedValues s
         )
         for i = 0 to (rowCount - 1) do
-            dgvKits.Rows.Item[i].Cells.Item[1].Value = undefined
-        local colObj = dgvKits.Columns.Item[1]
+            dgvKits.Rows.Item[i].Cells.Item[2].Value = undefined
+        local colObj = dgvKits.Columns.Item[2]
         colObj.Items.Clear()
         for s in names do colObj.Items.Add s
         for i = 0 to (rowCount - 1) do
         (
             local prev = savedValues[i + 1]
             if prev != "" and findItem names prev > 0 then
-                dgvKits.Rows.Item[i].Cells.Item[1].Value = prev
+                dgvKits.Rows.Item[i].Cells.Item[2].Value = prev
         )
     )
 
@@ -124,17 +176,21 @@ rollout pkgRollout "Package Script" width:560 height:615
         for i = 0 to (rowCount - 1) do
         (
             local row = dgvKits.Rows.Item[i]
-            local kitCell = row.Cells.Item[0]
-            local objCell = row.Cells.Item[1]
-            local kitStr = ""
-            local objStr = ""
-            try (if kitCell.Value != undefined then kitStr = trimAll (kitCell.Value as string)) catch()
-            try (if objCell.Value != undefined then objStr = objCell.Value as string) catch()
+            local kitCell  = row.Cells.Item[0]
+            local typeCell = row.Cells.Item[1]
+            local objCell  = row.Cells.Item[2]
+            local kitStr  = ""
+            local typeStr = "AUTO"
+            local objStr  = ""
+            try (if kitCell.Value  != undefined then kitStr  = trimAll (kitCell.Value as string)) catch()
+            try (if typeCell.Value != undefined then typeStr = (typeCell.Value as string))        catch()
+            try (if objCell.Value  != undefined then objStr  = objCell.Value as string)           catch()
+            if typeStr == "" then typeStr = "AUTO"
             if kitStr != "" and objStr != "" and objStr != noneTag then
             (
                 local n = getNodeByName objStr
                 if n != undefined and isValidNode n then
-                    append pairs #(kitStr, n)
+                    append pairs #(kitStr, n, typeStr)
             )
         )
         pairs
@@ -144,6 +200,12 @@ rollout pkgRollout "Package Script" width:560 height:615
     (
         for p in pairs where p[1] == key do return p[2]
         undefined
+    )
+
+    fn lookupType pairs key =
+    (
+        for p in pairs where p[1] == key do return p[3]
+        "AUTO"
     )
 
     fn parseKitEntry raw =
@@ -331,28 +393,424 @@ rollout pkgRollout "Package Script" width:560 height:615
         #(mn, mx)
     )
 
-    fn arrangeRow nodes =
+    fn bboxVolume n =
     (
-        local nextX = 0.0
-        for n in nodes where isValidNode n do
+        local bb = groupUnionBBox n
+        local d = bb[2] - bb[1]
+        (abs d.x) * (abs d.y) * (abs d.z)
+    )
+
+    -- Z rotation that brings a non-bed model's front face to -Y world
+    -- (camera position assumed to be at -Y, looking +Y, per spec).
+    fn frontAxisOffsetDeg axisStr =
+    (
+        local v = 0.0
+        case axisStr of
         (
-            local bbox = groupUnionBBox n
-            local bmin = bbox[1]
-            local bmax = bbox[2]
-            local offset = [nextX - bmin.x, 0, 0]
-            n.pos = n.pos + offset
-            nextX += (bmax.x - bmin.x) + 20.0
+            "+Y": v = 180.0
+            "-Y": v = 0.0
+            "+X": v = -90.0
+            "-X": v = 90.0
+            default: v = 0.0
         )
+        v
+    )
+
+    -- Z rotation that brings the bed's headboard to +Y world (and
+    -- therefore the foot to -Y world, facing the camera). The dropdown
+    -- value says where the headboard currently sits in the model at
+    -- identity rotation; the script then rotates the bed so that
+    -- direction ends up at +Y world.
+    fn bedHeadOffsetDeg headStr =
+    (
+        local v = 0.0
+        case headStr of
+        (
+            "+Y": v = 0.0
+            "-Y": v = 180.0
+            "+X": v = 90.0
+            "-X": v = -90.0
+            default: v = 0.0
+        )
+        v
+    )
+
+    -- Auto-detect the angle (CCW from +X) at which the headboard sits
+    -- relative to the bed's center, while the bed is at identity
+    -- rotation. The headboard is taken to be the geometry node with
+    -- the highest top (max Z) - in most bed models that is the
+    -- vertical headboard panel.
+    fn detectBedHeadAngleDeg bedNode =
+    (
+        local bb = groupUnionBBox bedNode
+        local center = (bb[1] + bb[2]) / 2.0
+        local geomNodes = #()
+        local visit = #(bedNode)
+        while visit.count > 0 do
+        (
+            local cur = visit[1]
+            deleteItem visit 1
+            for c in cur.children do
+            (
+                if isGroupHead c then append visit c
+                else if isValidNode c then append geomNodes c
+            )
+        )
+        if geomNodes.count == 0 then return 90.0
+        local maxZ = -1e30
+        local hbCenter = center
+        for c in geomNodes do
+        (
+            local cmax = c.max
+            if cmax.z > maxZ then
+            (
+                maxZ = cmax.z
+                hbCenter = (c.min + c.max) / 2.0
+            )
+        )
+        local dx = hbCenter.x - center.x
+        local dy = hbCenter.y - center.y
+        if (abs dx) < 0.001 and (abs dy) < 0.001 then return 90.0
+        atan2 dy dx
+    )
+
+    -- Reset node's rotation to identity, recenter so its bbox center is
+    -- at the origin, rotate around Z by (baseRotZ + rotAngle), then
+    -- move so the rotated bbox lands at targetPos. XY is aligned to
+    -- the bbox center, Z is aligned to the bbox MIN (the base of the
+    -- model) so the piece sits on targetPos.z (= floor level when 0)
+    -- instead of floating with half the model below the floor.
+    fn placeAndRotate node targetPos rotAngle baseRotZ =
+    (
+        try (node.rotation = (quat 0 0 0 1)) catch()
+        local bb = groupUnionBBox node
+        local bbCenter = (bb[1] + bb[2]) / 2.0
+        node.pos = node.pos - bbCenter
+        try (rotate node (eulerangles 0 0 (baseRotZ + rotAngle))) catch()
+        local bb2 = groupUnionBBox node
+        local cx = (bb2[1].x + bb2[2].x) / 2.0
+        local cy = (bb2[1].y + bb2[2].y) / 2.0
+        local baseZ = bb2[1].z
+        node.pos = node.pos + [targetPos.x - cx, targetPos.y - cy, targetPos.z - baseZ]
+    )
+
+    fn classifyByBBox n =
+    (
+        local bb = groupUnionBBox n
+        local d = bb[2] - bb[1]
+        local w  = abs d.x
+        local de = abs d.y
+        local h  = abs d.z
+        local mx = w
+        if de > mx then mx = de
+        local mn = w
+        if de < mn then mn = de
+        if mx == 0 then return "OTHER"
+        if h > mx * 1.5 and mn < mx * 0.4 then return "MIRROR"
+        if mx > mn * 2.0 then return "DRESSER"
+        if h > mx and mn < mx * 0.8 then return "CHEST"
+        "NIGHTSTAND"
+    )
+
+    -- Stack a mirror on top of a dresser. The mirror's base lands on
+    -- the dresser's top (placeAndRotate aligns base Z to targetPos.z).
+    fn stackMirrorOnDresser mirrorNode dresserNode baseRotZ ang =
+    (
+        local dbb = groupUnionBBox dresserNode
+        local cx = (dbb[1].x + dbb[2].x) / 2.0
+        local cy = (dbb[1].y + dbb[2].y) / 2.0
+        local topZ = dbb[2].z
+        placeAndRotate mirrorNode [cx, cy, topZ] ang baseRotZ
+    )
+
+    fn arrangeBedMode typed anchorItem baseRot bedBaseRot gap angBed angNS angChest angDresser =
+    (
+        local anchorW = 200.0
+        if anchorItem != undefined then
+        (
+            local effBedRot = bedBaseRot
+            if ddlBedHead.selected == "Auto" then
+            (
+                local savedRot = anchorItem[1].rotation
+                try (anchorItem[1].rotation = (quat 0 0 0 1)) catch()
+                local detected = detectBedHeadAngleDeg anchorItem[1]
+                try (anchorItem[1].rotation = savedRot) catch()
+                effBedRot = 90.0 - detected
+            )
+            placeAndRotate anchorItem[1] [0,0,0] angBed effBedRot
+            local bb = groupUnionBBox anchorItem[1]
+            anchorW = abs (bb[2].x - bb[1].x)
+        )
+
+        local nightstands = #()
+        local chests = #()
+        local dressers = #()
+        local mirrors = #()
+        local others = #()
+        for t in typed do
+        (
+            case t[2] of
+            (
+                "BED": ()
+                "HEADBOARD": ()
+                "NIGHTSTAND": append nightstands t
+                "CHEST": append chests t
+                "DRESSER": append dressers t
+                "MIRROR": append mirrors t
+                default: append others t
+            )
+        )
+
+        -- Nightstands to the left of the bed. Alternate angles so a
+        -- paired nightstand layout matches the spec (e.g. 35 / 32.5).
+        local cursorL = -(anchorW / 2.0) - gap
+        local nsIdx = 0
+        for ns in nightstands do
+        (
+            local thisAng = if (mod nsIdx 2) == 0 then angNS else (angNS - 2.5)
+            local bb = groupUnionBBox ns[1]
+            local w = abs (bb[2].x - bb[1].x)
+            placeAndRotate ns[1] [cursorL - w / 2.0, 0, 0] thisAng baseRot
+            cursorL -= (w + gap)
+            nsIdx += 1
+        )
+
+        -- Chests then dressers to the right.
+        local rightOrder = #()
+        for c in chests do append rightOrder #(c[1], angChest)
+        for d in dressers do append rightOrder #(d[1], angDresser)
+        local cursorR = (anchorW / 2.0) + gap
+        for it in rightOrder do
+        (
+            local bb = groupUnionBBox it[1]
+            local w = abs (bb[2].x - bb[1].x)
+            placeAndRotate it[1] [cursorR + w / 2.0, 0, 0] it[2] baseRot
+            cursorR += (w + gap)
+        )
+
+        -- Mirrors: stack on top of the matching dresser if there is
+        -- one, else drop into the right-row tail.
+        local mIdx = 1
+        for m in mirrors do
+        (
+            if mIdx <= dressers.count then
+                stackMirrorOnDresser m[1] dressers[mIdx][1] baseRot angDresser
+            else
+            (
+                local bb = groupUnionBBox m[1]
+                local w = abs (bb[2].x - bb[1].x)
+                placeAndRotate m[1] [cursorR + w / 2.0, 0, 0] angDresser baseRot
+                cursorR += (w + gap)
+            )
+            mIdx += 1
+        )
+
+        -- Others behind the bed.
+        local cursorO = -(anchorW / 2.0)
+        for o in others do
+        (
+            local bb = groupUnionBBox o[1]
+            local w = abs (bb[2].x - bb[1].x)
+            placeAndRotate o[1] [cursorO + w / 2.0, anchorW * 0.75, 0] 0.0 baseRot
+            cursorO += (w + gap)
+        )
+    )
+
+    fn arrangeHeadboardMode typed baseRot gap angBed angNS angChest angDresser =
+    (
+        local anchors = #()
+        local nightstands = #()
+        local chests = #()
+        local dressers = #()
+        local mirrors = #()
+        local others = #()
+        for t in typed do
+        (
+            case t[2] of
+            (
+                "BED": append anchors t
+                "HEADBOARD": append anchors t
+                "NIGHTSTAND": append nightstands t
+                "CHEST": append chests t
+                "DRESSER": append dressers t
+                "MIRROR": append mirrors t
+                default: append others t
+            )
+        )
+
+        -- Row: NS (with 2.5 alternation), HEADBOARD, CHEST, DRESSER, OTHERS.
+        -- Mirrors are reserved for stacking on a dresser if possible.
+        local ordered = #()
+        local nsIdx = 0
+        for ns in nightstands do
+        (
+            local thisAng = if (mod nsIdx 2) == 0 then angNS else (angNS - 2.5)
+            append ordered #(ns[1], thisAng)
+            nsIdx += 1
+        )
+        for a in anchors do append ordered #(a[1], angBed)
+        for c in chests do append ordered #(c[1], angChest)
+        for d in dressers do append ordered #(d[1], angDresser)
+        for o in others do append ordered #(o[1], 0.0)
+
+        if ordered.count == 0 then return undefined
+
+        local widths = #()
+        local total = 0.0
+        for it in ordered do
+        (
+            local bb = groupUnionBBox it[1]
+            local w = abs (bb[2].x - bb[1].x)
+            append widths w
+            total += w
+        )
+        if ordered.count > 1 then total += gap * (ordered.count - 1)
+
+        local cursorX = -(total / 2.0)
+        for i = 1 to ordered.count do
+        (
+            local it = ordered[i]
+            local w = widths[i]
+            placeAndRotate it[1] [cursorX + w / 2.0, 0, 0] it[2] baseRot
+            cursorX += (w + gap)
+        )
+
+        -- Mirrors on top of dressers.
+        local mIdx = 1
+        for m in mirrors do
+        (
+            if mIdx <= dressers.count then
+                stackMirrorOnDresser m[1] dressers[mIdx][1] baseRot angDresser
+            mIdx += 1
+        )
+    )
+
+    fn arrangeBedroom items =
+    (
+        local baseRot    = frontAxisOffsetDeg ddlFront.selected
+        local bedBaseRot = bedHeadOffsetDeg ddlBedHead.selected
+        local gap        = spnGap.value
+        local angBed     = spnAngleBed.value
+        local angNS      = spnAngleNS.value
+        local angChest   = spnAngleChest.value
+        local angDresser = spnAngleDresser.value
+
+        -- Split explicit types from AUTO.
+        local typed = #()
+        local autoItems = #()
+        for it in items do
+        (
+            local t = toUpper it[2]
+            if t == "AUTO" then append autoItems it
+            else append typed #(it[1], t)
+        )
+
+        local hasBed = false
+        local hasHB  = false
+        for t in typed do
+        (
+            if t[2] == "BED" do hasBed = true
+            if t[2] == "HEADBOARD" do hasHB = true
+        )
+
+        if autoItems.count > 0 then
+        (
+            local volSorted = #()
+            for a in autoItems do append volSorted a
+            for i = 1 to volSorted.count - 1 do
+                for j = 1 to volSorted.count - i do
+                    if (bboxVolume volSorted[j][1]) < (bboxVolume volSorted[j+1][1]) then
+                    (
+                        local tmp = volSorted[j]
+                        volSorted[j] = volSorted[j+1]
+                        volSorted[j+1] = tmp
+                    )
+            local startIdx = 1
+            if not hasBed and not hasHB and volSorted.count > 0 then
+            (
+                append typed #(volSorted[1][1], "BED")
+                hasBed = true
+                startIdx = 2
+            )
+            for i = startIdx to volSorted.count do
+                append typed #(volSorted[i][1], classifyByBBox volSorted[i][1])
+        )
+
+        local anchor = undefined
+        if hasBed then
+        (
+            for t in typed do if t[2] == "BED" do anchor = t
+            arrangeBedMode typed anchor baseRot bedBaseRot gap angBed angNS angChest angDresser
+        )
+        else
+            arrangeHeadboardMode typed baseRot gap angBed angNS angChest angDresser
+    )
+
+    -- Clone the picked template camera (and its target if any), add
+    -- both to the supplied layer, rename them after the package, and
+    -- re-aim them at the package's bbox center. The camera and target
+    -- are translated by the same offset (target -> package center) so
+    -- the template's view angle and distance are preserved - what
+    -- changes is just where the camera is looking.
+    fn cloneCameraToLayer layer pkgName pkgNodes =
+    (
+        if pickedCamera == undefined or not isValidNode pickedCamera then return undefined
+        local sources = #(pickedCamera)
+        local tgt = undefined
+        try (tgt = pickedCamera.target) catch()
+        if tgt != undefined and isValidNode tgt then append sources tgt
+        local newNodes
+        try (maxOps.cloneNodes sources cloneType:#copy newNodes:&newNodes) catch(newNodes = undefined)
+        if newNodes == undefined or newNodes.count == 0 then return undefined
+        for n in newNodes where isValidNode n do
+            try (layer.addNode n) catch()
+        try
+        (
+            if newNodes.count >= 1 then newNodes[1].name = uniqueName (pkgName + "_Cam")
+            if newNodes.count >= 2 then newNodes[2].name = uniqueName (pkgName + "_Cam_Target")
+        )
+        catch()
+
+        if newNodes.count >= 2 then
+        (
+            local mn = [1e30, 1e30, 1e30]
+            local mx = [-1e30, -1e30, -1e30]
+            local found = false
+            for n in pkgNodes where isValidNode n do
+            (
+                local nmn = n.min
+                local nmx = n.max
+                if nmn.x < mn.x then mn.x = nmn.x
+                if nmn.y < mn.y then mn.y = nmn.y
+                if nmn.z < mn.z then mn.z = nmn.z
+                if nmx.x > mx.x then mx.x = nmx.x
+                if nmx.y > mx.y then mx.y = nmx.y
+                if nmx.z > mx.z then mx.z = nmx.z
+                found = true
+            )
+            if found then
+            (
+                local pkgCenter = (mn + mx) / 2.0
+                local camNode = newNodes[1]
+                local tgtNode = newNodes[2]
+                local offset = pkgCenter - tgtNode.pos
+                try (camNode.pos = camNode.pos + offset) catch()
+                try (tgtNode.pos = pkgCenter) catch()
+            )
+        )
+
+        newNodes
     )
 
     fn buildPackage pkg series pairs missingOut =
     (
-        local createdRoots = #()
-        local createdAll   = #()
+        local typedRoots = #()
+        local createdAll = #()
         for item in pkg.items do
         (
             local kitKey = stripSeriesPrefix item.kitName series
             local src = lookupNode pairs kitKey
+            local typ = lookupType pairs kitKey
             if src == undefined or not isValidNode src then
                 appendIfUnique missingOut kitKey
             else
@@ -366,7 +824,7 @@ rollout pkgRollout "Package Script" width:560 height:615
                         local root = findCloneRoot newNodes
                         if root != undefined and isValidNode root then
                         (
-                            append createdRoots root
+                            append typedRoots #(root, typ)
                             for n in newNodes where isValidNode n do
                                 appendIfUnique createdAll n
                         )
@@ -375,17 +833,133 @@ rollout pkgRollout "Package Script" width:560 height:615
             )
         )
         if createdAll.count == 0 then return 0
-        arrangeRow createdRoots
+        arrangeBedroom typedRoots
         local layer = safeCreateHiddenLayer pkg.packageName
         -- Add every cloned node (root + descendants) so that hiding the
         -- layer hides everything together. Adding only the root leaves
         -- members visible because each MAX node carries its own layer.
         for n in createdAll where isValidNode n do
             try (layer.addNode n) catch()
+        local roots = for tr in typedRoots collect tr[1]
         local grp = undefined
-        try (grp = group createdRoots name:pkg.packageName) catch()
+        try (grp = group roots name:pkg.packageName) catch()
         if grp != undefined then try (layer.addNode grp) catch()
+        cloneCameraToLayer layer pkg.packageName createdAll
         createdAll.count
+    )
+
+    fn getSettingsPath = "C:\\PKG SCRIPT\\pkg_automation_settings.ini"
+
+    fn saveSettings =
+    (
+        local p = getSettingsPath()
+        try
+        (
+            setINISetting p "main" "Series"       edtSeries.text
+            setINISetting p "main" "ExcelPath"    edtExcel.text
+            setINISetting p "main" "FrontAxis"    ddlFront.selected
+            setINISetting p "main" "BedHead"      ddlBedHead.selected
+            setINISetting p "main" "Gap"          (spnGap.value as string)
+            setINISetting p "main" "AngleBed"     (spnAngleBed.value as string)
+            setINISetting p "main" "AngleNS"      (spnAngleNS.value as string)
+            setINISetting p "main" "AngleChest"   (spnAngleChest.value as string)
+            setINISetting p "main" "AngleDresser" (spnAngleDresser.value as string)
+            local camName = ""
+            if pickedCamera != undefined and isValidNode pickedCamera then camName = pickedCamera.name
+            setINISetting p "main" "CameraName" camName
+
+            local rowCount = dgvKits.RowCount
+            -- Clear any old kit entries first so removed rows don't linger.
+            try
+            (
+                local oldKeys = getINISetting p "kits"
+                for k in oldKeys do delIniSetting p "kits" k
+            )
+            catch()
+            setINISetting p "kits" "Count" (rowCount as string)
+            for i = 0 to (rowCount - 1) do
+            (
+                local row = dgvKits.Rows.Item[i]
+                local kit = ""
+                local typ = ""
+                local obj = ""
+                try (if row.Cells.Item[0].Value != undefined then kit = row.Cells.Item[0].Value as string) catch()
+                try (if row.Cells.Item[1].Value != undefined then typ = row.Cells.Item[1].Value as string) catch()
+                try (if row.Cells.Item[2].Value != undefined then obj = row.Cells.Item[2].Value as string) catch()
+                local idxStr = (i + 1) as string
+                setINISetting p "kits" ("Kit" + idxStr + "_ID")   kit
+                setINISetting p "kits" ("Kit" + idxStr + "_Type") typ
+                setINISetting p "kits" ("Kit" + idxStr + "_Obj")  obj
+            )
+        )
+        catch()
+        OK
+    )
+
+    fn loadSettings =
+    (
+        local p = getSettingsPath()
+        if not doesFileExist p then return undefined
+        try
+        (
+            local s = getINISetting p "main" "Series"
+            if s != "" then edtSeries.text = s
+            local e = getINISetting p "main" "ExcelPath"
+            if e != "" then edtExcel.text = e
+
+            local axisItems    = #("+Y","-Y","+X","-X")
+            local bedHeadItems = #("Auto","+Y","-Y","+X","-X")
+            local fa = getINISetting p "main" "FrontAxis"
+            local fi = findItem axisItems fa
+            if fi > 0 then ddlFront.selection = fi
+            local bh = getINISetting p "main" "BedHead"
+            local bi = findItem bedHeadItems bh
+            if bi > 0 then ddlBedHead.selection = bi
+
+            local g = getINISetting p "main" "Gap"
+            if g != "" then try (spnGap.value = (g as float)) catch()
+            local ab = getINISetting p "main" "AngleBed"
+            if ab != "" then try (spnAngleBed.value = (ab as float)) catch()
+            local ans = getINISetting p "main" "AngleNS"
+            if ans != "" then try (spnAngleNS.value = (ans as float)) catch()
+            local ac = getINISetting p "main" "AngleChest"
+            if ac != "" then try (spnAngleChest.value = (ac as float)) catch()
+            local ad = getINISetting p "main" "AngleDresser"
+            if ad != "" then try (spnAngleDresser.value = (ad as float)) catch()
+
+            local cn = getINISetting p "main" "CameraName"
+            if cn != "" then
+            (
+                local n = getNodeByName cn
+                if n != undefined and isValidNode n then
+                (
+                    pickedCamera = n
+                    lblPickedCam.text = "Camera: " + n.name
+                )
+            )
+
+            local cs = getINISetting p "kits" "Count"
+            local count = 0
+            if cs != "" then try (count = cs as integer) catch(count = 0)
+            if count > 0 then
+            (
+                dgvKits.Rows.Clear()
+                for i = 1 to count do dgvKits.Rows.Add()
+                for i = 1 to count do
+                (
+                    local row = dgvKits.Rows.Item[i-1]
+                    local idxStr = i as string
+                    local kit = getINISetting p "kits" ("Kit" + idxStr + "_ID")
+                    local typ = getINISetting p "kits" ("Kit" + idxStr + "_Type")
+                    local obj = getINISetting p "kits" ("Kit" + idxStr + "_Obj")
+                    try (if kit != "" then row.Cells.Item[0].Value = kit) catch()
+                    try (if typ != "" then row.Cells.Item[1].Value = typ) catch()
+                    try (if obj != "" then row.Cells.Item[2].Value = obj) catch()
+                )
+            )
+        )
+        catch()
+        OK
     )
 
     fn getPendingPackages = pendingPackages
@@ -418,6 +992,8 @@ rollout pkgRollout "Package Script" width:560 height:615
             msg += "\n\nUnmapped Kit IDs:"
             for m in missingKits do msg += "\n  - " + m
         )
+        if pickedCamera == undefined then
+            msg += "\n\nNote: No template VRayPhysicalCamera was picked, so no cameras were added to layers."
         messageBox msg title:"Run Complete"
     )
 
@@ -435,12 +1011,19 @@ rollout pkgRollout "Package Script" width:560 height:615
 
         local colKit = dotNetObject "System.Windows.Forms.DataGridViewTextBoxColumn"
         colKit.HeaderText = "KIT ID"
-        colKit.FillWeight = 30
+        colKit.FillWeight = 22
         dgvKits.Columns.Add colKit
+
+        local colType = dotNetObject "System.Windows.Forms.DataGridViewComboBoxColumn"
+        colType.HeaderText = "TYPE"
+        colType.FillWeight = 28
+        local typeOptions = #("AUTO", "BED", "HEADBOARD", "NIGHTSTAND", "CHEST", "DRESSER", "MIRROR", "OTHER")
+        for s in typeOptions do colType.Items.Add s
+        dgvKits.Columns.Add colType
 
         local colObj = dotNetObject "System.Windows.Forms.DataGridViewComboBoxColumn"
         colObj.HeaderText = "SELECT OBJECT"
-        colObj.FillWeight = 70
+        colObj.FillWeight = 50
         dgvKits.Columns.Add colObj
 
         local names = collectSceneObjectNames()
@@ -448,7 +1031,11 @@ rollout pkgRollout "Package Script" width:560 height:615
 
         dgvKits.Rows.Add()
         dgvKits.Rows.Add()
+
+        loadSettings()
     )
+
+    on pkgRollout close do saveSettings()
 
     on dgvKits DataError s e do (e.ThrowException = false)
 
@@ -460,7 +1047,22 @@ rollout pkgRollout "Package Script" width:560 height:615
     (
         local fp = getOpenFileName caption:"Select Excel file" \
             types:"Excel Files (*.xlsx;*.xls)|*.xlsx;*.xls|All Files (*.*)|*.*|"
-        if fp != undefined then edtExcel.text = fp
+        if fp != undefined then
+        (
+            edtExcel.text = fp
+            saveSettings()
+        )
+    )
+
+    on btnPickCam pressed do
+    (
+        local pick = pickObject message:"Pick a VRayPhysicalCamera (its target will be copied too)"
+        if pick != undefined and isValidNode pick then
+        (
+            pickedCamera = pick
+            lblPickedCam.text = "Camera: " + pick.name
+            saveSettings()
+        )
     )
 
     on btnRun pressed do
@@ -469,6 +1071,7 @@ rollout pkgRollout "Package Script" width:560 height:615
         -- otherwise the value the user just typed/picked is invisible
         -- to buildLookup and we report it as "unmapped".
         try (dgvKits.EndEdit()) catch()
+        saveSettings()
 
         local series = trimAll edtSeries.text
         if series == "" then
