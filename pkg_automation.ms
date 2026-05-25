@@ -86,7 +86,7 @@ rollout pkgPreviewDlg "Confirm Packages" width:460 height:530
     )
 )
 
-rollout pkgRollout "Package Script" width:560 height:680
+rollout pkgRollout "Package Script" width:560 height:650
 (
     local noneTag         = "(none)"
     local pendingSeries   = ""
@@ -104,7 +104,8 @@ rollout pkgRollout "Package Script" width:560 height:680
 
     dotNetControl dgvKits "System.Windows.Forms.DataGridView" pos:[20,100] width:520 height:380
 
-    button btnAddKit "+ ADD MORE KIT" pos:[200,490] width:160 height:30
+    dotNetControl btnDelKit "Button" pos:[160,490] width:130 height:30
+    dotNetControl btnAddKit "Button" pos:[300,490] width:160 height:30
 
     label    lblExcel  "EXCEL FILE" pos:[20,530]  width:100
     edittext edtExcel  ""           pos:[125,527] width:320 height:22 readonly:true
@@ -117,19 +118,9 @@ rollout pkgRollout "Package Script" width:560 height:680
     label        lblGap     "GAP"        pos:[315,562] width:30
     spinner      spnGap     ""           pos:[350,560] width:90  range:[0,100000,5.0] type:#float
 
-    label   lblAngles      "ANGLES (deg)" pos:[20,592]  width:90
-    label   lblAngBed      "BED"          pos:[115,592] width:30
-    spinner spnAngleBed    ""             pos:[148,590] width:55  range:[-180,180,35]   type:#float scale:0.5
-    label   lblAngNS       "NS"           pos:[210,592] width:25
-    spinner spnAngleNS     ""             pos:[238,590] width:55  range:[-180,180,35]   type:#float scale:0.5
-    label   lblAngChest    "CHEST"        pos:[300,592] width:40
-    spinner spnAngleChest  ""             pos:[342,590] width:55  range:[-180,180,32.5] type:#float scale:0.5
-    label   lblAngDresser  "DRESS"        pos:[405,592] width:45
-    spinner spnAngleDresser ""            pos:[452,590] width:55  range:[-180,180,35]   type:#float scale:0.5
-
-    button btnPickCam   "PICK VRAY CAMERA"    pos:[20,630]  width:160 height:32
-    label  lblPickedCam "(no camera picked)"  pos:[190,637] width:255 height:18
-    button btnRun       "RUN"                 pos:[455,630] width:85  height:32
+    button btnPickCam   "PICK VRAY CAMERA"    pos:[20,600]  width:160 height:32
+    label  lblPickedCam "(no camera picked)"  pos:[190,607] width:255 height:18
+    button btnRun       "RUN"                 pos:[455,600] width:85  height:32
 
     fn trimAll s = trimLeft (trimRight s)
 
@@ -523,25 +514,89 @@ rollout pkgRollout "Package Script" width:560 height:680
         placeAndRotate mirrorNode [cx, cy, topZ] ang baseRotZ
     )
 
-    fn arrangeBedMode typed anchorItem baseRot bedBaseRot gap angBed angNS angChest angDresser =
+    -- Width/depth/height of node's bbox at identity rotation. Used so
+    -- we can compute rotated-rectangle corners regardless of the
+    -- node's current world transform.
+    fn getLocalSize node =
     (
-        local anchorW = 200.0
+        local savedRot = node.rotation
+        try (node.rotation = (quat 0 0 0 1)) catch()
+        local bb = groupUnionBBox node
+        try (node.rotation = savedRot) catch()
+        [abs (bb[2].x - bb[1].x), abs (bb[2].y - bb[1].y), abs (bb[2].z - bb[1].z)]
+    )
+
+    -- The 4 world XY corners of a rectangle of `size`, centred at
+    -- `centerXY`, rotated by `angDeg` around Z. Order:
+    -- 1=BL(-,-), 2=BR(+,-), 3=TR(+,+), 4=TL(-,+).
+    fn cornersOfRotatedRect size centerXY angDeg =
+    (
+        local hw = size.x / 2.0
+        local hd = size.y / 2.0
+        local c = cos angDeg
+        local s = sin angDeg
+        #(
+            [centerXY.x + (-hw)*c - (-hd)*s, centerXY.y + (-hw)*s + (-hd)*c],
+            [centerXY.x + ( hw)*c - (-hd)*s, centerXY.y + ( hw)*s + (-hd)*c],
+            [centerXY.x + ( hw)*c - ( hd)*s, centerXY.y + ( hw)*s + ( hd)*c],
+            [centerXY.x + (-hw)*c - ( hd)*s, centerXY.y + (-hw)*s + ( hd)*c]
+        )
+    )
+
+    fn cornerMaxX cs =
+    (
+        local r = cs[1]
+        for c in cs do if c.x > r.x then r = c
+        r
+    )
+
+    fn cornerMinX cs =
+    (
+        local r = cs[1]
+        for c in cs do if c.x < r.x then r = c
+        r
+    )
+
+    -- Angle for the i-th piece on a given side (1-based).
+    -- Single piece on a side: 35. Multiple pieces: closest to anchor
+    -- = 32.5, every other = 35. Right side gets the negated values.
+    fn sideAngle i totalCount isRight =
+    (
+        local a = 0.0
+        if totalCount == 1 then a = 35.0
+        else if i == 1 then a = 32.5
+        else a = 35.0
+        if isRight then -a else a
+    )
+
+    fn arrangeBedMode typed anchorItem baseRot bedBaseRot gap =
+    (
+        local angAnchor = 35.0
+
+        -- Effective rotation for the anchor piece (BED auto-detects
+        -- the headboard; HEADBOARD falls back to FRONT AXIS).
+        local effAnchorRot = bedBaseRot
+        local anchorSize = [200.0, 100.0, 0.0]
+        local anchorTotal = 0.0
         if anchorItem != undefined then
         (
-            local effBedRot = bedBaseRot
-            if ddlBedHead.selected == "Auto" then
+            if anchorItem[2] == "BED" and ddlBedHead.selected == "Auto" then
             (
                 local savedRot = anchorItem[1].rotation
                 try (anchorItem[1].rotation = (quat 0 0 0 1)) catch()
                 local detected = detectBedHeadAngleDeg anchorItem[1]
                 try (anchorItem[1].rotation = savedRot) catch()
-                effBedRot = 90.0 - detected
+                effAnchorRot = 90.0 - detected
             )
-            placeAndRotate anchorItem[1] [0,0,0] angBed effBedRot
-            local bb = groupUnionBBox anchorItem[1]
-            anchorW = abs (bb[2].x - bb[1].x)
+            else if anchorItem[2] == "HEADBOARD" then
+                effAnchorRot = baseRot
+
+            anchorSize = getLocalSize anchorItem[1]
+            placeAndRotate anchorItem[1] [0, 0, 0] angAnchor effAnchorRot
+            anchorTotal = effAnchorRot + angAnchor
         )
 
+        -- Bucket the other pieces.
         local nightstands = #()
         local chests = #()
         local dressers = #()
@@ -561,127 +616,76 @@ rollout pkgRollout "Package Script" width:560 height:680
             )
         )
 
-        -- Nightstands to the left of the bed. Alternate angles so a
-        -- paired nightstand layout matches the spec (e.g. 35 / 32.5).
-        local cursorL = -(anchorW / 2.0) - gap
-        local nsIdx = 0
-        for ns in nightstands do
+        -- Anchor's leftmost / rightmost world corner is what the
+        -- first neighbour's facing corner has to meet (with a gap).
+        local anchorCorners = cornersOfRotatedRect anchorSize [0, 0] anchorTotal
+        local lastLeft  = cornerMinX anchorCorners
+        local lastRight = cornerMaxX anchorCorners
+
+        -- LEFT side: nightstands, closest to anchor first.
+        local nsCount = nightstands.count
+        for i = 1 to nsCount do
         (
-            local thisAng = if (mod nsIdx 2) == 0 then angNS else (angNS - 2.5)
-            local bb = groupUnionBBox ns[1]
-            local w = abs (bb[2].x - bb[1].x)
-            placeAndRotate ns[1] [cursorL - w / 2.0, 0, 0] thisAng baseRot
-            cursorL -= (w + gap)
-            nsIdx += 1
+            local ang = sideAngle i nsCount false
+            local sz  = getLocalSize nightstands[i][1]
+            local tot = baseRot + ang
+            local cs0 = cornersOfRotatedRect sz [0, 0] tot
+            local rt0 = cornerMaxX cs0
+            local cw  = [lastLeft.x - gap - rt0.x, lastLeft.y - rt0.y]
+            placeAndRotate nightstands[i][1] [cw.x, cw.y, 0] ang baseRot
+            local csF = cornersOfRotatedRect sz cw tot
+            lastLeft = cornerMinX csF
         )
 
-        -- Chests then dressers to the right.
-        local rightOrder = #()
-        for c in chests do append rightOrder #(c[1], angChest)
-        for d in dressers do append rightOrder #(d[1], angDresser)
-        local cursorR = (anchorW / 2.0) + gap
-        for it in rightOrder do
+        -- RIGHT side: chests then dressers, closest to anchor first.
+        -- Build the order and the per-piece angle in lockstep so we
+        -- can give the matching mirror the dresser's exact angle.
+        local rightItems = #()
+        for c in chests do append rightItems c
+        for d in dressers do append rightItems d
+        local rightCount = rightItems.count
+        local rightAngles = #()
+        for i = 1 to rightCount do append rightAngles (sideAngle i rightCount true)
+
+        for i = 1 to rightCount do
         (
-            local bb = groupUnionBBox it[1]
-            local w = abs (bb[2].x - bb[1].x)
-            placeAndRotate it[1] [cursorR + w / 2.0, 0, 0] it[2] baseRot
-            cursorR += (w + gap)
+            local ang = rightAngles[i]
+            local sz  = getLocalSize rightItems[i][1]
+            local tot = baseRot + ang
+            local cs0 = cornersOfRotatedRect sz [0, 0] tot
+            local lf0 = cornerMinX cs0
+            local cw  = [lastRight.x + gap - lf0.x, lastRight.y - lf0.y]
+            placeAndRotate rightItems[i][1] [cw.x, cw.y, 0] ang baseRot
+            local csF = cornersOfRotatedRect sz cw tot
+            lastRight = cornerMaxX csF
         )
 
-        -- Mirrors: stack on top of the matching dresser if there is
-        -- one, else drop into the right-row tail.
+        -- Mirrors stack on top of the matching dresser, using that
+        -- dresser's actual angle so the two pieces line up.
         local mIdx = 1
         for m in mirrors do
         (
             if mIdx <= dressers.count then
-                stackMirrorOnDresser m[1] dressers[mIdx][1] baseRot angDresser
-            else
             (
-                local bb = groupUnionBBox m[1]
-                local w = abs (bb[2].x - bb[1].x)
-                placeAndRotate m[1] [cursorR + w / 2.0, 0, 0] angDresser baseRot
-                cursorR += (w + gap)
+                local rIdx = chests.count + mIdx
+                local dAng = if rIdx <= rightAngles.count then rightAngles[rIdx] else -35.0
+                stackMirrorOnDresser m[1] dressers[mIdx][1] baseRot dAng
             )
             mIdx += 1
         )
 
-        -- Others behind the bed.
-        local cursorO = -(anchorW / 2.0)
-        for o in others do
+        -- Loose / unclassified pieces: drop them in a back row behind
+        -- the anchor, no artistic angle.
+        if others.count > 0 then
         (
-            local bb = groupUnionBBox o[1]
-            local w = abs (bb[2].x - bb[1].x)
-            placeAndRotate o[1] [cursorO + w / 2.0, anchorW * 0.75, 0] 0.0 baseRot
-            cursorO += (w + gap)
-        )
-    )
-
-    fn arrangeHeadboardMode typed baseRot gap angBed angNS angChest angDresser =
-    (
-        local anchors = #()
-        local nightstands = #()
-        local chests = #()
-        local dressers = #()
-        local mirrors = #()
-        local others = #()
-        for t in typed do
-        (
-            case t[2] of
+            local behindY = (anchorSize.y / 2.0) + gap * 2.0
+            local cursorO = -(anchorSize.x / 2.0)
+            for o in others do
             (
-                "BED": append anchors t
-                "HEADBOARD": append anchors t
-                "NIGHTSTAND": append nightstands t
-                "CHEST": append chests t
-                "DRESSER": append dressers t
-                "MIRROR": append mirrors t
-                default: append others t
+                local sz = getLocalSize o[1]
+                placeAndRotate o[1] [cursorO + sz.x / 2.0, behindY + sz.y / 2.0, 0] 0.0 baseRot
+                cursorO += (sz.x + gap)
             )
-        )
-
-        -- Row: NS (with 2.5 alternation), HEADBOARD, CHEST, DRESSER, OTHERS.
-        -- Mirrors are reserved for stacking on a dresser if possible.
-        local ordered = #()
-        local nsIdx = 0
-        for ns in nightstands do
-        (
-            local thisAng = if (mod nsIdx 2) == 0 then angNS else (angNS - 2.5)
-            append ordered #(ns[1], thisAng)
-            nsIdx += 1
-        )
-        for a in anchors do append ordered #(a[1], angBed)
-        for c in chests do append ordered #(c[1], angChest)
-        for d in dressers do append ordered #(d[1], angDresser)
-        for o in others do append ordered #(o[1], 0.0)
-
-        if ordered.count == 0 then return undefined
-
-        local widths = #()
-        local total = 0.0
-        for it in ordered do
-        (
-            local bb = groupUnionBBox it[1]
-            local w = abs (bb[2].x - bb[1].x)
-            append widths w
-            total += w
-        )
-        if ordered.count > 1 then total += gap * (ordered.count - 1)
-
-        local cursorX = -(total / 2.0)
-        for i = 1 to ordered.count do
-        (
-            local it = ordered[i]
-            local w = widths[i]
-            placeAndRotate it[1] [cursorX + w / 2.0, 0, 0] it[2] baseRot
-            cursorX += (w + gap)
-        )
-
-        -- Mirrors on top of dressers.
-        local mIdx = 1
-        for m in mirrors do
-        (
-            if mIdx <= dressers.count then
-                stackMirrorOnDresser m[1] dressers[mIdx][1] baseRot angDresser
-            mIdx += 1
         )
     )
 
@@ -690,10 +694,6 @@ rollout pkgRollout "Package Script" width:560 height:680
         local baseRot    = frontAxisOffsetDeg ddlFront.selected
         local bedBaseRot = bedHeadOffsetDeg ddlBedHead.selected
         local gap        = spnGap.value
-        local angBed     = spnAngleBed.value
-        local angNS      = spnAngleNS.value
-        local angChest   = spnAngleChest.value
-        local angDresser = spnAngleDresser.value
 
         -- Split explicit types from AUTO.
         local typed = #()
@@ -736,14 +736,16 @@ rollout pkgRollout "Package Script" width:560 height:680
                 append typed #(volSorted[i][1], classifyByBBox volSorted[i][1])
         )
 
+        -- Anchor: BED first, else HEADBOARD. Both go through the
+        -- same corner-touching layout - the only difference is how
+        -- the anchor's base rotation is derived.
         local anchor = undefined
         if hasBed then
-        (
             for t in typed do if t[2] == "BED" do anchor = t
-            arrangeBedMode typed anchor baseRot bedBaseRot gap angBed angNS angChest angDresser
-        )
-        else
-            arrangeHeadboardMode typed baseRot gap angBed angNS angChest angDresser
+        else if hasHB then
+            for t in typed do if t[2] == "HEADBOARD" do anchor = t
+
+        arrangeBedMode typed anchor baseRot bedBaseRot gap
     )
 
     -- Clone the picked template camera (and its target if any), add
@@ -860,10 +862,6 @@ rollout pkgRollout "Package Script" width:560 height:680
             setINISetting p "main" "FrontAxis"    ddlFront.selected
             setINISetting p "main" "BedHead"      ddlBedHead.selected
             setINISetting p "main" "Gap"          (spnGap.value as string)
-            setINISetting p "main" "AngleBed"     (spnAngleBed.value as string)
-            setINISetting p "main" "AngleNS"      (spnAngleNS.value as string)
-            setINISetting p "main" "AngleChest"   (spnAngleChest.value as string)
-            setINISetting p "main" "AngleDresser" (spnAngleDresser.value as string)
             local camName = ""
             if pickedCamera != undefined and isValidNode pickedCamera then camName = pickedCamera.name
             setINISetting p "main" "CameraName" camName
@@ -918,14 +916,6 @@ rollout pkgRollout "Package Script" width:560 height:680
 
             local g = getINISetting p "main" "Gap"
             if g != "" then try (spnGap.value = (g as float)) catch()
-            local ab = getINISetting p "main" "AngleBed"
-            if ab != "" then try (spnAngleBed.value = (ab as float)) catch()
-            local ans = getINISetting p "main" "AngleNS"
-            if ans != "" then try (spnAngleNS.value = (ans as float)) catch()
-            local ac = getINISetting p "main" "AngleChest"
-            if ac != "" then try (spnAngleChest.value = (ac as float)) catch()
-            local ad = getINISetting p "main" "AngleDresser"
-            if ad != "" then try (spnAngleDresser.value = (ad as float)) catch()
 
             local cn = getINISetting p "main" "CameraName"
             if cn != "" then
@@ -960,6 +950,25 @@ rollout pkgRollout "Package Script" width:560 height:680
         )
         catch()
         OK
+    )
+
+    -- Cell-edit Enter fix: by default the Enter key inside a cell
+    -- editor bubbles up to the dialog and triggers RUN, which loses
+    -- whatever the user just typed. Commit explicitly on Enter and
+    -- swallow the key so the rollout never sees it.
+    -- Use e.KeyValue (int) rather than (e.KeyCode as integer) - the
+    -- .NET Keys enum can't be cast directly to MAXScript integer.
+    fn editorKeyDown s e =
+    (
+        local kv = 0
+        try (kv = e.KeyValue) catch()
+        if kv == 13 then
+        (
+            try (dgvKits.EndEdit()) catch()
+            try (dgvKits.ClearSelection()) catch()
+            try (e.SuppressKeyPress = true) catch()
+            try (e.Handled = true) catch()
+        )
     )
 
     fn getPendingPackages = pendingPackages
@@ -1032,6 +1041,23 @@ rollout pkgRollout "Package Script" width:560 height:680
         dgvKits.Rows.Add()
         dgvKits.Rows.Add()
 
+        local colorCls = dotNetClass "System.Drawing.Color"
+        local flatStyle = (dotNetClass "System.Windows.Forms.FlatStyle").Flat
+        local boldFont = dotNetObject "System.Drawing.Font" "Tahoma" 9.0 \
+                         ((dotNetClass "System.Drawing.FontStyle").Bold)
+
+        btnDelKit.Text      = "DELETE KIT"
+        btnDelKit.BackColor = colorCls.FromArgb 178 34 34
+        btnDelKit.ForeColor = colorCls.White
+        btnDelKit.FlatStyle = flatStyle
+        btnDelKit.Font      = boldFont
+
+        btnAddKit.Text      = "+ ADD MORE KIT"
+        btnAddKit.BackColor = colorCls.FromArgb 60 130 60
+        btnAddKit.ForeColor = colorCls.White
+        btnAddKit.FlatStyle = flatStyle
+        btnAddKit.Font      = boldFont
+
         loadSettings()
     )
 
@@ -1039,9 +1065,34 @@ rollout pkgRollout "Package Script" width:560 height:680
 
     on dgvKits DataError s e do (e.ThrowException = false)
 
+    on dgvKits EditingControlShowing s e do
+    (
+        local ctrl = e.Control
+        try (dotNet.removeAllEventHandlers ctrl "KeyDown") catch()
+        dotNet.addEventHandler ctrl "KeyDown" editorKeyDown
+    )
+
     on btnRefresh pressed do refreshSceneObjects()
 
-    on btnAddKit pressed do dgvKits.Rows.Add()
+    on btnAddKit click s e do dgvKits.Rows.Add()
+
+    on btnDelKit click s e do
+    (
+        try
+        (
+            local rowIdx = -1
+            if dgvKits.SelectedRows.Count > 0 then
+                rowIdx = dgvKits.SelectedRows.Item[0].Index
+            else if dgvKits.CurrentCell != undefined then
+                rowIdx = dgvKits.CurrentCell.RowIndex
+            if rowIdx >= 0 and rowIdx < dgvKits.RowCount then
+            (
+                dgvKits.Rows.RemoveAt rowIdx
+                saveSettings()
+            )
+        )
+        catch()
+    )
 
     on btnBrowse pressed do
     (
