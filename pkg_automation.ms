@@ -115,8 +115,10 @@ rollout pkgRollout "Package Script" width:560 height:650
     dropdownList ddlFront   items:#("+Y","-Y","+X","-X") pos:[115,558] width:55 selection:2
     label        lblBedHead "BED HEAD"   pos:[180,562] width:60
     dropdownList ddlBedHead items:#("Auto","+Y","-Y","+X","-X") pos:[245,558] width:55 selection:1
-    label        lblGap     "GAP"        pos:[315,562] width:30
-    spinner      spnGap     ""           pos:[350,560] width:90  range:[0,100000,5.0] type:#float
+    label        lblGap "GAP (in)" pos:[315,562] width:55
+    dropdownList ddlGap items:#("1","2","3","4","5") pos:[375,558] width:55 selection:2
+    label        lblChestX "CHEST x" pos:[440,562] width:55
+    dropdownList ddlChestX items:#("-5","-4.75","-4.5","-4.25","-4","-3.75","-3.5","-3.25","-3","-2.5","-2","-1.5","-1","-0.75","-0.5","-0.25","0","0.25","0.5","0.75","1","2","3","4","5") pos:[500,558] width:55 selection:21
 
     button btnPickCam   "PICK VRAY CAMERA"    pos:[20,600]  width:160 height:32
     label  lblPickedCam "(no camera picked)"  pos:[190,607] width:255 height:18
@@ -557,6 +559,36 @@ rollout pkgRollout "Package Script" width:560 height:650
         r
     )
 
+    -- GAP dropdown value (inches as string) -> cm as integer, rounded.
+    -- 2" -> 5, 3" -> 8, 4" -> 10, 5" -> 13.
+    fn gapToCm =
+    (
+        local inchVal = 2
+        try (inchVal = (ddlGap.selected as integer)) catch()
+        if inchVal == undefined then inchVal = 2
+        ((inchVal * 2.54) + 0.5) as integer
+    )
+
+    -- Horizontal FOV (degrees) of the picked camera. Works for VRay
+    -- Physical (focal_length + film_gate), Autodesk Physical
+    -- (focal_length + film_width), and standard target cameras (fov).
+    fn cameraHFOVDeg cam =
+    (
+        local fl = undefined
+        local fg = undefined
+        try (fl = cam.focal_length) catch()
+        try (fg = cam.film_gate) catch()
+        if fg == undefined then try (fg = cam.film_width) catch()
+        if fl != undefined and fg != undefined and fl > 0 then
+            2.0 * (atan (fg / (2.0 * fl)))
+        else
+        (
+            local f = 45.0
+            try (f = cam.fov) catch()
+            f
+        )
+    )
+
     -- Angle for the i-th piece on a given side (1-based).
     -- Single piece on a side: 35. Multiple pieces: closest to anchor
     -- = 32.5, every other = 35. Right side gets the negated values.
@@ -647,14 +679,42 @@ rollout pkgRollout "Package Script" width:560 height:650
         local rightAngles = #()
         for i = 1 to rightCount do append rightAngles (sideAngle i rightCount true)
 
+        -- When the bed-side neighbour on the right is a CHEST and
+        -- there is something past it (e.g. a dresser), align the
+        -- chest's BR (front-right) corner to the bed's BR with 4 x
+        -- gap of X offset. This shifts the chest UP along Y so it
+        -- sits behind the bed's foot line, matching the reference
+        -- layout. Single piece on the right, or a non-chest first
+        -- piece, keep the normal corner-to-corner placement.
+        local chestSpecialMode = (rightCount >= 2 and chests.count >= 1 \
+                                  and rightItems[1][2] == "CHEST")
         for i = 1 to rightCount do
         (
             local ang = rightAngles[i]
             local sz  = getLocalSize rightItems[i][1]
             local tot = baseRot + ang
             local cs0 = cornersOfRotatedRect sz [0, 0] tot
-            local lf0 = cornerMinX cs0
-            local cw  = [lastRight.x + gap - lf0.x, lastRight.y - lf0.y]
+            local cw
+            if i == 1 and chestSpecialMode then
+            (
+                -- corners order from cornersOfRotatedRect: 1=BL 2=BR 3=TR 4=TL.
+                -- Y: align chest's BR with bed's BR (lifts the chest up so
+                --    its body sits behind the bed's foot line).
+                -- X: keep the leftmost (BL) corner clear of the bed's right
+                --    edge by (chestMult * gap) so the user can dial in the
+                --    visible horizontal spacing from the panel.
+                local chestMult = 1.0
+                try (chestMult = (ddlChestX.selected as float)) catch()
+                if chestMult == undefined then chestMult = 1.0
+                local chestBL = cs0[1]
+                local chestBR = cs0[2]
+                cw = [lastRight.x + gap * chestMult - chestBL.x, lastRight.y - chestBR.y]
+            )
+            else
+            (
+                local lf0 = cornerMinX cs0
+                cw = [lastRight.x + gap - lf0.x, lastRight.y - lf0.y]
+            )
             placeAndRotate rightItems[i][1] [cw.x, cw.y, 0] ang baseRot
             local csF = cornersOfRotatedRect sz cw tot
             lastRight = cornerMaxX csF
@@ -693,7 +753,7 @@ rollout pkgRollout "Package Script" width:560 height:650
     (
         local baseRot    = frontAxisOffsetDeg ddlFront.selected
         local bedBaseRot = bedHeadOffsetDeg ddlBedHead.selected
-        local gap        = spnGap.value
+        local gap        = gapToCm()
 
         -- Split explicit types from AUTO.
         local typed = #()
@@ -748,13 +808,19 @@ rollout pkgRollout "Package Script" width:560 height:650
         arrangeBedMode typed anchor baseRot bedBaseRot gap
     )
 
-    -- Clone the picked template camera (and its target if any), add
-    -- both to the supplied layer, rename them after the package, and
-    -- re-aim them at the package's bbox center. The camera and target
-    -- are translated by the same offset (target -> package center) so
-    -- the template's view angle and distance are preserved - what
-    -- changes is just where the camera is looking.
-    fn cloneCameraToLayer layer pkgName pkgNodes =
+    -- Clone the picked template camera + its target (all camera
+    -- properties — focal length, film gate, ISO, etc. — carry over
+    -- because we use #copy), add both to the supplied layer, rename
+    -- them after the package, and position them to frame the package:
+    --
+    --   Camera X      = 0 (locked)
+    --   Camera Z      = 100 + kitCount * 20 (cm)
+    --   Camera Y      = -distance, auto-computed from template's
+    --                   horizontal FOV so the package fits in frame
+    --   Target X      = 0 (locked)
+    --   Target Y      = 0 (locked)
+    --   Target Z      = package bbox vertical mid (free, auto-centred)
+    fn cloneCameraToLayer layer pkgName pkgNodes kitCount =
     (
         if pickedCamera == undefined or not isValidNode pickedCamera then return undefined
         local sources = #(pickedCamera)
@@ -775,6 +841,7 @@ rollout pkgRollout "Package Script" width:560 height:650
 
         if newNodes.count >= 2 then
         (
+            -- Package bbox in world.
             local mn = [1e30, 1e30, 1e30]
             local mx = [-1e30, -1e30, -1e30]
             local found = false
@@ -790,14 +857,36 @@ rollout pkgRollout "Package Script" width:560 height:650
                 if nmx.z > mx.z then mx.z = nmx.z
                 found = true
             )
+
             if found then
             (
-                local pkgCenter = (mn + mx) / 2.0
                 local camNode = newNodes[1]
                 local tgtNode = newNodes[2]
-                local offset = pkgCenter - tgtNode.pos
-                try (camNode.pos = camNode.pos + offset) catch()
-                try (tgtNode.pos = pkgCenter) catch()
+
+                local pkgW = mx.x - mn.x
+                local pkgD = mx.y - mn.y
+                local pkgH = mx.z - mn.z
+                local tgtZ = (mn.z + mx.z) / 2.0
+
+                local camZ = 100.0 + (kitCount as float) * 20.0
+
+                -- Pick the larger of width and height as the dim that
+                -- has to fit horizontally in frame.
+                local fitDim = if pkgW > pkgH then pkgW else pkgH
+
+                -- Horizontal FOV from the template camera (degrees).
+                local hFOV = cameraHFOVDeg camNode
+                local halfFOV = hFOV / 2.0
+                local tanHalf = tan halfFOV
+                local distance = 500.0
+                if tanHalf > 0.0001 then
+                    distance = (fitDim / 2.0) / tanHalf
+                -- Push back by half the package depth so the near
+                -- face of the package still fits, plus 15% margin.
+                distance = (distance + pkgD / 2.0) * 1.15
+
+                try (camNode.pos = [0, -distance, camZ]) catch()
+                try (tgtNode.pos = [0, 0, tgtZ]) catch()
             )
         )
 
@@ -846,7 +935,7 @@ rollout pkgRollout "Package Script" width:560 height:650
         local grp = undefined
         try (grp = group roots name:pkg.packageName) catch()
         if grp != undefined then try (layer.addNode grp) catch()
-        cloneCameraToLayer layer pkg.packageName createdAll
+        cloneCameraToLayer layer pkg.packageName createdAll typedRoots.count
         createdAll.count
     )
 
@@ -861,7 +950,8 @@ rollout pkgRollout "Package Script" width:560 height:650
             setINISetting p "main" "ExcelPath"    edtExcel.text
             setINISetting p "main" "FrontAxis"    ddlFront.selected
             setINISetting p "main" "BedHead"      ddlBedHead.selected
-            setINISetting p "main" "Gap"          (spnGap.value as string)
+            setINISetting p "main" "GapInch"      ddlGap.selected
+            setINISetting p "main" "ChestGapMult" ddlChestX.selected
             local camName = ""
             if pickedCamera != undefined and isValidNode pickedCamera then camName = pickedCamera.name
             setINISetting p "main" "CameraName" camName
@@ -914,8 +1004,15 @@ rollout pkgRollout "Package Script" width:560 height:650
             local bi = findItem bedHeadItems bh
             if bi > 0 then ddlBedHead.selection = bi
 
-            local g = getINISetting p "main" "Gap"
-            if g != "" then try (spnGap.value = (g as float)) catch()
+            local gapItems = #("1","2","3","4","5")
+            local gi = getINISetting p "main" "GapInch"
+            local gIdx = findItem gapItems gi
+            if gIdx > 0 then ddlGap.selection = gIdx
+
+            local chestMultItems = #("-5","-4.75","-4.5","-4.25","-4","-3.75","-3.5","-3.25","-3","-2.5","-2","-1.5","-1","-0.75","-0.5","-0.25","0","0.25","0.5","0.75","1","2","3","4","5")
+            local cmStr = getINISetting p "main" "ChestGapMult"
+            local cmIdx = findItem chestMultItems cmStr
+            if cmIdx > 0 then ddlChestX.selection = cmIdx
 
             local cn = getINISetting p "main" "CameraName"
             if cn != "" then
