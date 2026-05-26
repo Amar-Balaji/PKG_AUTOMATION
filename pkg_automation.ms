@@ -86,7 +86,7 @@ rollout pkgPreviewDlg "Confirm Packages" width:460 height:530
     )
 )
 
-rollout pkgRollout "Package Script" width:560 height:650
+rollout pkgRollout "Package Script" width:560 height:680
 (
     local noneTag         = "(none)"
     local pendingSeries   = ""
@@ -120,9 +120,16 @@ rollout pkgRollout "Package Script" width:560 height:650
     label        lblChestX "CHEST x" pos:[440,562] width:55
     dropdownList ddlChestX items:#("-5","-4.75","-4.5","-4.25","-4","-3.75","-3.5","-3.25","-3","-2.5","-2","-1.5","-1","-0.75","-0.5","-0.25","0","0.25","0.5","0.75","1","2","3","4","5") pos:[500,558] width:55 selection:21
 
-    button btnPickCam   "PICK VRAY CAMERA"    pos:[20,600]  width:160 height:32
-    label  lblPickedCam "(no camera picked)"  pos:[190,607] width:255 height:18
-    button btnRun       "RUN"                 pos:[455,600] width:85  height:32
+    label        lblCamFit   "CAM FIT %"                                   pos:[20,594]  width:70
+    spinner      spnCamFit   ""                                            pos:[95,592]  width:50 range:[50,100,77] type:#integer
+    label        lblCamMode  "CAM MODE"                                    pos:[155,594] width:60
+    dropdownList ddlCamMode  items:#("AUTO+CAP","AUTO","TEMPLATE","RATIO") pos:[220,592] width:105 selection:1
+    label        lblCamRatio "RATIO"                                       pos:[335,594] width:45
+    spinner      spnCamRatio ""                                            pos:[385,592] width:60 range:[0.5,10,2.67] type:#float scale:0.01
+
+    button btnPickCam   "PICK VRAY CAMERA"    pos:[20,628]  width:160 height:32
+    label  lblPickedCam "(no camera picked)"  pos:[190,635] width:255 height:18
+    button btnRun       "RUN"                 pos:[455,628] width:85  height:32
 
     fn trimAll s = trimLeft (trimRight s)
 
@@ -866,6 +873,8 @@ rollout pkgRollout "Package Script" width:560 height:650
                 local pkgW = mx.x - mn.x
                 local pkgD = mx.y - mn.y
                 local pkgH = mx.z - mn.z
+                local pkgCenterX = (mn.x + mx.x) / 2.0
+                local pkgCenterY = (mn.y + mx.y) / 2.0
                 local tgtZ = (mn.z + mx.z) / 2.0
 
                 local camZ = 100.0 + (kitCount as float) * 20.0
@@ -874,19 +883,63 @@ rollout pkgRollout "Package Script" width:560 height:650
                 -- has to fit horizontally in frame.
                 local fitDim = if pkgW > pkgH then pkgW else pkgH
 
-                -- Horizontal FOV from the template camera (degrees).
+                -- CAM FIT % from the panel: 100 = edge-to-edge,
+                -- 80 = 80% fill (inner safe), 50 = half the frame.
+                local fitPct = 80
+                try (fitPct = spnCamFit.value) catch()
+                if fitPct == undefined or fitPct < 50 then fitPct = 50
+                if fitPct > 100 then fitPct = 100
+                local marginFactor = 100.0 / (fitPct as float)
+
+                -- Auto distance: derived from template camera FOV +
+                -- package size, then scaled by CAM FIT %.
                 local hFOV = cameraHFOVDeg camNode
                 local halfFOV = hFOV / 2.0
                 local tanHalf = tan halfFOV
-                local distance = 500.0
+                local autoBase = 500.0
                 if tanHalf > 0.0001 then
-                    distance = (fitDim / 2.0) / tanHalf
-                -- Push back by half the package depth so the near
-                -- face of the package still fits, plus 15% margin.
-                distance = (distance + pkgD / 2.0) * 1.15
+                    autoBase = (fitDim / 2.0) / tanHalf
+                local autoDist = (autoBase + pkgD / 2.0) * marginFactor
 
-                try (camNode.pos = [0, -distance, camZ]) catch()
-                try (tgtNode.pos = [0, 0, tgtZ]) catch()
+                -- Template distance: how far the template camera was
+                -- from its own target (e.g. 1790 cm). Scaled by CAM
+                -- FIT % so 80% pulls in to 80% of that distance.
+                local templateDist = 0.0
+                try
+                (
+                    if pickedCamera.target != undefined and isValidNode pickedCamera.target then
+                    (
+                        local tDiff = pickedCamera.pos - pickedCamera.target.pos
+                        templateDist = length tDiff
+                    )
+                )
+                catch()
+                local scaledTemplate = templateDist * marginFactor
+
+                -- CAM MODE picks how distance is decided:
+                --   AUTO+CAP  = min(auto, template)  -- default
+                --   AUTO      = pure auto-fit
+                --   TEMPLATE  = use template distance only
+                --   RATIO     = pkgW * spnCamRatio (CAM FIT ignored)
+                local mode = "AUTO+CAP"
+                try (mode = ddlCamMode.selected) catch()
+                local distance = autoDist
+                if mode == "RATIO" then
+                (
+                    local ratio = 2.67
+                    try (ratio = spnCamRatio.value) catch()
+                    distance = pkgW * ratio
+                )
+                else if mode == "TEMPLATE" and templateDist > 0 then
+                    distance = scaledTemplate
+                else if mode == "AUTO+CAP" and templateDist > 0 then
+                    distance = if scaledTemplate < autoDist then scaledTemplate else autoDist
+
+                -- Camera + target X follow the package's bbox centre
+                -- so asymmetric arrangements (chest pulled up, etc.)
+                -- still land dead-centre horizontally in the frame.
+                try (camNode.pos = [pkgCenterX, pkgCenterY - distance, camZ]) catch()
+                try (tgtNode.pos = [pkgCenterX, pkgCenterY, tgtZ]) catch()
             )
         )
 
@@ -952,6 +1005,9 @@ rollout pkgRollout "Package Script" width:560 height:650
             setINISetting p "main" "BedHead"      ddlBedHead.selected
             setINISetting p "main" "GapInch"      ddlGap.selected
             setINISetting p "main" "ChestGapMult" ddlChestX.selected
+            setINISetting p "main" "CamFitPct"    (spnCamFit.value as string)
+            setINISetting p "main" "CamMode"      ddlCamMode.selected
+            setINISetting p "main" "CamRatio"     (spnCamRatio.value as string)
             local camName = ""
             if pickedCamera != undefined and isValidNode pickedCamera then camName = pickedCamera.name
             setINISetting p "main" "CameraName" camName
@@ -1013,6 +1069,17 @@ rollout pkgRollout "Package Script" width:560 height:650
             local cmStr = getINISetting p "main" "ChestGapMult"
             local cmIdx = findItem chestMultItems cmStr
             if cmIdx > 0 then ddlChestX.selection = cmIdx
+
+            local cf = getINISetting p "main" "CamFitPct"
+            if cf != "" then try (spnCamFit.value = (cf as integer)) catch()
+
+            local camModeItems = #("AUTO+CAP","AUTO","TEMPLATE","RATIO")
+            local cmod = getINISetting p "main" "CamMode"
+            local cmodIdx = findItem camModeItems cmod
+            if cmodIdx > 0 then ddlCamMode.selection = cmodIdx
+
+            local cr = getINISetting p "main" "CamRatio"
+            if cr != "" then try (spnCamRatio.value = (cr as float)) catch()
 
             local cn = getINISetting p "main" "CameraName"
             if cn != "" then
